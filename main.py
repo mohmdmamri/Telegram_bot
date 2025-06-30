@@ -7,6 +7,7 @@ import telegram
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 import shutil
+import asyncio
 
 # --- قراءة المتغيرات من بيئة الاستضافة ---
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -794,6 +795,10 @@ def hello():
     return "I am alive and the bot is running with PostgreSQL!"
 
 def run_bot():
+    
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
     """Contains the bot's setup and polling logic."""
     setup_database()  # Run the new PostgreSQL setup
     application = Application.builder().token(TOKEN).build()
