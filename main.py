@@ -829,7 +829,7 @@ def run_bot():
     # Error Handler
     application.add_error_handler(error_handler)
 
-    logger.info("Bot is starting polling with PostgreSQL backend...")
+    logger.info("Bot is starting polling with PostgreSQL backend... okkkkk")
     application.run_polling()
 
 def main():
