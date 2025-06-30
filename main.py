@@ -688,30 +688,159 @@ async def download_file_from_button(query: telegram.CallbackQuery, context: Cont
         await query.answer("حدث خطأ أثناء إرسال الملف.", show_alert=True)
 
 async def handle_button_press(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    (النسخة الكاملة والمحدثة)
+    تتعامل مع جميع ضغطات الأزرار بشكل صحيح.
+    """
     query = update.callback_query
     await query.answer()
+
     data = query.data
     user_id = query.from_user.id
-    logger.info(f"User {user_id} pressed button: '{data}'")
+    user_username = query.from_user.username
+
+    logger.info(f"User {user_username} (ID: {user_id}) pressed button with data: '{data}'")
+    
     root_abs_path = os.path.abspath(FILES_DIR)
 
-    # Simplified navigation logic
-    if data.startswith("ls_"):
+    # --- 1. منطق الرفع الذكي ---
+    if data.startswith("nav_upload_"):
+        relative_path = data.split('_', 2)[-1]
+        path_to_navigate = os.path.abspath(os.path.join(root_abs_path, relative_path))
+        await show_upload_destination_menu(update, context, path_to_navigate)
+        return
+        
+    elif data.startswith("upload_to_"):
+        relative_path = data.split('_', 2)[-1]
+        destination_path = os.path.abspath(os.path.join(root_abs_path, relative_path))
+        
+        pending_file = context.user_data.pop('pending_upload', None)
+        if not pending_file:
+            await query.edit_message_text("عذرًا، يبدو أن جلسة الرفع قد انتهت. الرجاء إرسال الملف مرة أخرى.")
+            return
+
+        await query.edit_message_text(f"جاري حفظ الملف `{pending_file['file_name']}`...")
+
+        try:
+            bot_file = await context.bot.get_file(pending_file['file_id'])
+            
+            # منع الكتابة فوق الملفات الموجودة
+            base_name, ext = os.path.splitext(pending_file['file_name'])
+            counter = 1
+            final_path = os.path.join(destination_path, pending_file['file_name'])
+            while os.path.exists(final_path):
+                new_file_name = f"{base_name}_{counter}{ext}"
+                final_path = os.path.join(destination_path, new_file_name)
+                counter += 1
+
+            await bot_file.download_to_drive(final_path)
+            
+            # حفظ معلومات الملف في قاعدة بيانات PostgreSQL
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO files (file_name, file_path, size_bytes, uploaded_by, is_folder) VALUES (%s, %s, %s, %s, FALSE)",
+                (os.path.basename(final_path), final_path, pending_file['file_size'], user_id)
+            )
+            conn.commit()
+            cursor.close()
+            conn.close()
+
+            await query.answer(f"✅ تم حفظ الملف بنجاح!", show_alert=False)
+            logger.info(f"User {user_username} completed upload of '{os.path.basename(final_path)}' to '{destination_path}'.")
+            await list_files_with_buttons(query.message, context, destination_path)
+
+        except Exception as e:
+            logger.error(f"Error during final file save operation: {e}")
+            await query.edit_message_text("حدث خطأ فادح أثناء حفظ الملف.")
+        return
+
+    elif data == "cancel_upload":
+        context.user_data.pop('pending_upload', None)
+        await query.edit_message_text("تم إلغاء عملية الرفع.")
+        await send_main_keyboard(update, context)
+        return
+
+    # --- 2. منطق الحذف التفاعلي ---
+    elif data == "admin_delete_start":
+        await show_deletion_menu(update, context, root_abs_path)
+        return
+        
+    elif data.startswith("nav_delete_"):
+        relative_path = data.split('_', 2)[-1]
+        path_to_navigate = os.path.abspath(os.path.join(root_abs_path, relative_path))
+        await show_deletion_menu(update, context, path_to_navigate)
+        return
+
+    elif data.startswith("confirm_delete_"):
+        relative_path = data.split('_', 2)[-1]
+        item_name = os.path.basename(relative_path)
+        parent_rel_path = os.path.dirname(relative_path) if os.path.dirname(relative_path) else '.'
+        
+        keyboard = [[
+            InlineKeyboardButton("✅ نعم، احذف الآن", callback_data=f"execute_delete_{relative_path}"),
+            InlineKeyboardButton("❌ لا، إلغاء", callback_data=f"nav_delete_{parent_rel_path}")
+        ]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(f"⚠️ هل أنت متأكد من حذف '{item_name}'؟\n\n**لا يمكن التراجع عن هذا الإجراء!**", reply_markup=reply_markup, parse_mode='Markdown')
+        return
+
+    elif data.startswith("execute_delete_"):
+        relative_path = data.split('_', 2)[-1]
+        item_abs_path = os.path.abspath(os.path.join(root_abs_path, relative_path))
+        
+        success, message = await delete_item_logic(item_abs_path)
+        await query.answer(message, show_alert=True)
+        
+        parent_abs_path = os.path.dirname(item_abs_path)
+        await show_deletion_menu(update, context, parent_abs_path)
+        return
+        
+    elif data == "noop": # زر لا يفعل شيئاً (يستخدم بجانب أزرار الحذف للملفات)
+        return
+
+    # --- 3. منطق إنشاء المجلدات التفاعلي ---
+    elif data.startswith("nav_create_"):
+        relative_path = data.split('_', 2)[-1]
+        path_to_navigate = os.path.abspath(os.path.join(root_abs_path, relative_path))
+        await show_folder_creation_menu(update, context, path_to_navigate)
+        return
+
+    elif data.startswith("create_here_"):
+        relative_path = data.split('_', 2)[-1]
+        creation_path = os.path.abspath(os.path.join(root_abs_path, relative_path))
+        context.user_data['user_action'] = 'awaiting_new_folder_name'
+        context.user_data['creation_path'] = creation_path
+        
+        dir_name = os.path.basename(creation_path) if creation_path != root_abs_path else "الجذر"
+        await query.edit_message_text(f"تم اختيار الإنشاء في: `{dir_name}`\n\nالآن، أرسل اسم المجلد الجديد كرسالة نصية.", parse_mode='Markdown')
+        return
+
+    # --- 4. منطق تصفح الملفات وتنزيلها ---
+    elif data.startswith("ls_"):
         target_path_segment = data[len("ls_"):]
-        current_path = context.user_data.get(f"{user_id}_current_path", root_abs_path)
+        current_path_key = f"{user_id}_current_path"
+        current_path = context.user_data.get(current_path_key, root_abs_path)
+
         if target_path_segment == "root": new_path = root_abs_path
         elif target_path_segment == "..": new_path = os.path.dirname(current_path)
         else: new_path = os.path.join(current_path, target_path_segment)
+        
         abs_new_path = os.path.abspath(new_path)
         if not abs_new_path.startswith(root_abs_path):
             await query.edit_message_text("عذرًا، لا يمكنك الوصول إلى هذا المسار.")
             return
+
+        context.user_data[current_path_key] = abs_new_path
         await list_files_with_buttons(query.message, context, abs_new_path)
         return
 
-    # Simplified logic for other buttons
     elif data.startswith("download_"):
-        await download_file_from_button(query, context, data[len("download_"):])
+        relative_path_to_download = data.split('_', 1)[-1]
+        await download_file_from_button(query, context, relative_path_to_download)
+        return
+
+    # --- 5. أزرار القوائم العامة والإدارية ---
     elif data == "main_menu":
         await send_main_keyboard(update, context)
     elif data == "admin_menu":
@@ -720,65 +849,46 @@ async def handle_button_press(update: Update, context: ContextTypes.DEFAULT_TYPE
         await send_admin_roles_menu(update, context)
     elif data == "my_role":
         await my_role(update, context)
-    # ... other handlers like delete, upload, etc.
-    # The logic for upload and delete is complex and requires careful state management.
-    # The provided code shows the structure. We will focus on the database conversion.
-    elif data.startswith("upload_to_"):
-        relative_path = data[len("upload_to_"):]
-        destination_path = os.path.abspath(os.path.join(root_abs_path, relative_path))
-        pending_file = context.user_data.pop('pending_upload', None)
-        if not pending_file:
-            await query.edit_message_text("انتهت جلسة الرفع. أرسل الملف مجدداً.")
-            return
-        await query.edit_message_text(f"جاري حفظ `{pending_file['file_name']}`...")
-        bot_file = await context.bot.get_file(pending_file['file_id'])
-        final_path = os.path.join(destination_path, pending_file['file_name'])
-        # (Add logic to prevent overwriting if needed)
-        await bot_file.download_to_drive(final_path)
-        conn = None
-        try:
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            cursor.execute(
-                "INSERT INTO files (file_name, file_path, size_bytes, uploaded_by, is_folder) VALUES (%s, %s, %s, %s, FALSE)",
-                (os.path.basename(final_path), final_path, pending_file['file_size'], user_id)
-            )
-            conn.commit()
-            await query.edit_message_text(f"✅ تم حفظ الملف بنجاح في `{os.path.basename(destination_path)}`!")
-            logger.info(f"User {user_id} saved file to {destination_path}")
-        except Exception as e:
-            logger.error(f"DB error saving file record: {e}")
-            await query.edit_message_text("حدث خطأ أثناء تسجيل الملف في قاعدة البيانات.")
-        finally:
-            if conn:
-                cursor.close()
-                conn.close()
-
-    # Add other button handlers here based on the original file
-    elif data == "admin_delete_start":
-        await show_deletion_menu(update, context, root_abs_path)
-    elif data.startswith("nav_delete_"):
-        relative_path = data.split('_', 2)[-1]
-        path_to_navigate = os.path.abspath(os.path.join(root_abs_path, relative_path))
-        await show_deletion_menu(update, context, path_to_navigate)
-    elif data.startswith("confirm_delete_"):
-        relative_path = data.split('_', 2)[-1]
-        item_name = os.path.basename(relative_path)
-        parent_rel_path = os.path.dirname(relative_path)
-        keyboard = [[
-            InlineKeyboardButton("✅ نعم، احذف", callback_data=f"execute_delete_{relative_path}"),
-            InlineKeyboardButton("❌ إلغاء", callback_data=f"nav_delete_{parent_rel_path}")
-        ]]
-        await query.edit_message_text(f"⚠️ هل أنت متأكد من حذف '{item_name}'؟", reply_markup=InlineKeyboardMarkup(keyboard))
-    elif data.startswith("execute_delete_"):
-        relative_path = data.split('_', 2)[-1]
-        item_abs_path = os.path.abspath(os.path.join(root_abs_path, relative_path))
-        success, message = await delete_item_logic(item_abs_path)
-        await query.answer(message, show_alert=True)
-        await show_deletion_menu(update, context, os.path.dirname(item_abs_path))
+    elif data == "contact_admin_btn":
+        await query.edit_message_text(
+            "للتواصل مع الإدارة، استخدم الأمر: `/contact_admin <رسالتك>`",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 القائمة الرئيسية", callback_data="main_menu")]])
+        )
+    elif data == "admin_newfolder": # <-- هذا هو الشرط الذي كان مفقودًا
+        if is_admin_or_higher(user_id):
+            await show_folder_creation_menu(update, context, root_abs_path)
+        else:
+            await query.answer("عذرًا، أنت لا تملك الصلاحية.", show_alert=True)
+        return
+    elif data == "admin_stats_button":
+        await show_stats_from_button(update, context)
+    elif data == "admin_list_admins_button":
+        await list_admins_from_button(update, context)
+        
+    # --- 6. الأزرار التي تعرض مساعدة نصية للأوامر ---
+    elif data == "admin_upload_info":
+        await query.edit_message_text(
+            "لرفع ملف، قم بإرساله مباشرة إلى البوت في أي وقت وسيتم توجيهك.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ عودة", callback_data="admin_menu")]])
+        )
+    elif data == "admin_set_role":
+        await query.edit_message_text(
+            "لتعيين دور: `/addadmin @username <role>`",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ عودة", callback_data="admin_roles_menu")]])
+        )
+    elif data == "admin_remove_role":
+        await query.edit_message_text(
+            "لإزالة دور: `/removeadmin @username`",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ عودة", callback_data="admin_roles_menu")]])
+        )
+    elif data == "admin_broadcast_button":
+        await query.edit_message_text(
+            "لبث رسالة: `/broadcast <الرسالة>`",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ عودة", callback_data="admin_menu")]])
+        )
     else:
-        # Fallback for other buttons from the original code
-        await context.bot.send_message(chat_id=user_id, text=f"Button '{data}' handler not fully implemented in this version.")
+        logger.warning(f"Unhandled button callback data: {data}")
+        await query.answer("هذا الزر ليس له وظيفة محددة بعد.")
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
