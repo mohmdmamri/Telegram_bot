@@ -830,7 +830,7 @@ def run_bot():
     application.add_error_handler(error_handler)
 
     logger.info("Bot is starting polling with PostgreSQL backend... okkkkk")
-    application.run_polling()
+    application.run_polling(stop_signals=None)
 
 def main():
     """Main function to start the web server and the bot thread."""
